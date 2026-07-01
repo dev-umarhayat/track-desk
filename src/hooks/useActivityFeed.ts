@@ -18,17 +18,19 @@ interface BrowserTabInfo {
   title: string;
 }
 
-// Mirrors the browsers `get_active_browser_tab` knows how to script on the
+// Mirrors the browsers `get_active_browser_tab` knows how to handle on the
 // Rust side (src-tauri/src/lib.rs) — kept in sync manually since there's no
 // shared source of truth across the IPC boundary.
+// macOS: bundle display names (from NSWorkspace)
+// Windows: exe stem, no extension (from active-win-pos-rs QueryFullProcessImageName)
+// Linux: WM_CLASS res_name, lowercase (from active-win-pos-rs via X11)
 const BROWSER_APPS = new Set([
-  "Google Chrome",
-  "Brave Browser",
-  "Microsoft Edge",
-  "Arc",
-  "Vivaldi",
-  "Chromium",
-  "Safari",
+  // macOS
+  "Google Chrome", "Brave Browser", "Microsoft Edge", "Arc", "Vivaldi", "Chromium", "Safari",
+  // Windows
+  "chrome", "brave", "msedge", "firefox", "opera", "vivaldi", "chromium",
+  // Linux
+  "google-chrome", "brave-browser", "microsoft-edge", "firefox", "vivaldi-stable", "chromium-browser",
 ]);
 
 function randomCaptureDelay() {
@@ -54,9 +56,10 @@ function pngBytesToDataUrl(bytes: Uint8Array) {
  * Rust `get_active_window` command, NSWorkspace/Win32/X11 under the hood)
  * every `ACTIVE_WINDOW_POLL_MS`, and accumulates seconds per app. When the
  * focused app is a known browser, it also asks the browser itself (via
- * `get_active_browser_tab`, AppleScript under the hood) for the front tab's
- * URL/title and accumulates seconds per URL the same way. Also takes real
- * screenshots via `capture_screenshot` on a random 2-5 minute cadence. */
+ * `get_active_browser_tab`: AppleScript on macOS, PowerShell UIAutomation on
+ * Windows, AT-SPI2 on Linux) for the front tab's URL/title and accumulates
+ * seconds per URL the same way. Also takes real screenshots via
+ * `capture_screenshot` on a random 2-5 minute cadence. */
 export function useActivityFeed(running: boolean) {
   const [apps, setApps] = useState<AppUsageEntry[]>([]);
   const [urls, setUrls] = useState<UrlUsageEntry[]>([]);

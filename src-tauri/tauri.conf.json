@@ -22,6 +22,17 @@
         "visible": true
       },
       {
+        "label": "dev",
+        "url": "index.html#/dev",
+        "title": "TrackDesk — Dev Inspector",
+        "width": 1200,
+        "height": 750,
+        "minWidth": 900,
+        "minHeight": 500,
+        "resizable": true,
+        "visible": false
+      },
+      {
         "label": "widget",
         "url": "index.html#/widget",
         "title": "TrackDesk Widget",

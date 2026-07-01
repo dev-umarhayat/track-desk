@@ -16,6 +16,7 @@ interface TimerScreenProps {
   onResume: () => void;
   onStop: () => void;
   onSignOut: () => void;
+  onOpenDev?: () => void;
   widgetVisible: boolean;
   onToggleWidget: () => void;
   stats: TimeStats;
@@ -66,6 +67,7 @@ export function TimerScreen({
   onResume,
   onStop,
   onSignOut,
+  onOpenDev,
   widgetVisible,
   onToggleWidget,
   stats,
@@ -83,6 +85,15 @@ export function TimerScreen({
         <Avatar initials={user.initials} />
         <div className="flex-1 text-[13px] font-medium">{user.name}</div>
         <StatusBadge status={status} />
+        {onOpenDev && (
+          <button
+            onClick={onOpenDev}
+            title="Open Dev Inspector (dev only)"
+            className="cursor-pointer appearance-none rounded bg-purple-600/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-purple-400 transition-colors hover:bg-purple-600/40"
+          >
+            DEV
+          </button>
+        )}
         <button
           onClick={onToggleWidget}
           title={widgetVisible ? "Hide floating widget" : "Show floating widget"}

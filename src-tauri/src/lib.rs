@@ -78,7 +78,163 @@ fn active_browser_tab(app_name: &str) -> Result<BrowserTabInfo, String> {
     Ok(BrowserTabInfo { url, title })
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Reads the front tab URL/title of the focused browser window on Windows via
+/// PowerShell UIAutomation — walks the accessibility tree to the omnibox Edit
+/// control, which holds the full URL even when the bar is not focused.
+/// Spawning powershell takes ~200-400 ms; acceptable at a 2 s poll cadence.
+#[cfg(target_os = "windows")]
+fn active_browser_tab(app_name: &str) -> Result<BrowserTabInfo, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // active-win-pos-rs returns the exe stem on Windows ("chrome", "msedge", …)
+    let process_name = match app_name {
+        "chrome" | "Google Chrome" => "chrome",
+        "brave" | "Brave Browser" => "brave",
+        "msedge" | "Microsoft Edge" => "msedge",
+        "firefox" | "Mozilla Firefox" | "Firefox" => "firefox",
+        "opera" => "opera",
+        "vivaldi" | "Vivaldi" => "vivaldi",
+        "chromium" | "Chromium" => "chromium",
+        _ => return Err("not a supported browser".to_string()),
+    };
+
+    let script = format!(
+        r#"Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+$p = Get-Process "{proc}" -EA SilentlyContinue | Where-Object {{$_.MainWindowHandle -ne 0}} | Select-Object -First 1
+if (-not $p) {{exit 1}}
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($p.MainWindowHandle)
+if (-not $root) {{exit 1}}
+$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)
+$bar = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$cond)
+if (-not $bar) {{exit 1}}
+$v = $bar.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+$url = $v.Current.Value
+if ([string]::IsNullOrEmpty($url)) {{exit 1}}
+Write-Output ($url + [char]0x1f + $root.Current.Name)"#,
+        proc = process_name
+    );
+
+    let output = std::process::Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err("could not read browser URL".to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut parts = stdout.splitn(2, '\u{1f}');
+    let url = parts.next().unwrap_or("").trim().to_string();
+    let title = parts.next().unwrap_or("").trim().to_string();
+
+    if url.is_empty() {
+        return Err("browser returned no URL".to_string());
+    }
+
+    Ok(BrowserTabInfo { url, title })
+}
+
+/// Reads the front tab URL/title on Linux via AT-SPI2 (the accessibility bus
+/// pre-installed on Ubuntu/GNOME). Requires python3-gi, which ships by default
+/// on all Ubuntu desktop images. Falls back gracefully if unavailable.
+#[cfg(target_os = "linux")]
+fn active_browser_tab(app_name: &str) -> Result<BrowserTabInfo, String> {
+    // active-win-pos-rs returns the WM_CLASS res_name on Linux, which is the
+    // lowercase process/app identifier. Map to the AT-SPI display name so the
+    // Python script can match the application node in the accessibility tree.
+    let atspi_name = match app_name {
+        "google-chrome" | "Google Chrome" | "chrome" => "google chrome",
+        "chromium" | "chromium-browser" | "Chromium" => "chromium",
+        "brave-browser" | "brave" | "Brave Browser" => "brave browser",
+        "microsoft-edge" | "Microsoft Edge" => "microsoft edge",
+        "firefox" | "Firefox" | "Firefox Web Browser" | "Mozilla Firefox" => "firefox",
+        "opera" => "opera",
+        "vivaldi-stable" | "vivaldi" | "Vivaldi" => "vivaldi",
+        _ => return Err("not a supported browser".to_string()),
+    };
+
+    let script = format!(
+        r#"import sys
+try:
+    import gi; gi.require_version('Atspi','2.0')
+    from gi.repository import Atspi
+except Exception as e:
+    sys.stderr.write('AT-SPI2 unavailable: '+str(e)+'\n'); sys.exit(1)
+SEP='\x1f'
+TARGET='{name}'
+def find_url_bar(node,depth=0):
+    if depth>12: return None
+    try:
+        role=node.get_role()
+        if role in(Atspi.Role.ENTRY,Atspi.Role.TEXT):
+            val=''
+            try: val=node.get_text(0,-1)or''
+            except Exception: pass
+            if val.startswith(('http://','https://','file://')): return node
+            nm=(node.get_name()or'').lower()
+            ds=(node.get_description()or'').lower()
+            if any(k in nm or k in ds for k in('address','location','url','search','omnibox')):
+                if val: return node
+        for i in range(node.get_child_count()):
+            r=find_url_bar(node.get_child(i),depth+1)
+            if r: return r
+    except Exception: pass
+    return None
+desktop=Atspi.get_desktop(0)
+for i in range(desktop.get_child_count()):
+    try:
+        app=desktop.get_child(i)
+        if not app: continue
+        aname=(app.get_name()or'').lower()
+        if TARGET not in aname and aname not in TARGET: continue
+        bar=find_url_bar(app)
+        if not bar: continue
+        url=bar.get_text(0,-1)or''
+        if not url.startswith(('http://','https://','file://')): continue
+        win=None
+        for j in range(app.get_child_count()):
+            try:
+                w=app.get_child(j)
+                if w and w.get_role()==Atspi.Role.FRAME: win=w; break
+            except Exception: pass
+        title=(win.get_name()if win else app.get_name())or''
+        print(url+SEP+title); sys.exit(0)
+    except Exception: continue
+sys.exit(1)
+"#,
+        name = atspi_name
+    );
+
+    let output = std::process::Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "could not read browser URL".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut parts = stdout.splitn(2, '\u{1f}');
+    let url = parts.next().unwrap_or("").trim().to_string();
+    let title = parts.next().unwrap_or("").trim().to_string();
+
+    if url.is_empty() {
+        return Err("browser returned no URL".to_string());
+    }
+
+    Ok(BrowserTabInfo { url, title })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn active_browser_tab(_app_name: &str) -> Result<BrowserTabInfo, String> {
     Err("browser tab tracking is not supported on this platform".to_string())
 }
@@ -129,7 +285,52 @@ fn system_idle_seconds() -> Result<u64, String> {
     Ok((now.wrapping_sub(info.dw_time) / 1000) as u64)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Idle seconds on Linux: tries xprintidle first (X11/XWayland), then falls
+/// back to the GNOME Mutter D-Bus idle monitor (native Wayland). Both tools
+/// ship with or can be installed on Ubuntu:
+///   X11/XWayland: sudo apt install xprintidle
+///   Wayland/GNOME: gdbus is part of glib2 (pre-installed on Ubuntu desktop)
+#[cfg(target_os = "linux")]
+fn system_idle_seconds() -> Result<u64, String> {
+    // xprintidle outputs milliseconds as a plain integer
+    if let Ok(out) = std::process::Command::new("xprintidle").output() {
+        if out.status.success() {
+            if let Ok(ms) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+                return Ok(ms / 1000);
+            }
+        }
+    }
+
+    // GNOME Mutter idle monitor via D-Bus. Output: "(uint64 <ms>,)\n"
+    let out = std::process::Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        let raw = String::from_utf8_lossy(&out.stdout);
+        // Strip parens, comma, and optional "uint64 " type prefix
+        let inner = raw.trim().trim_start_matches('(').trim_end_matches(",)").trim();
+        let ms_str = inner.split_whitespace().last().unwrap_or(inner);
+        let ms: u64 = ms_str
+            .parse()
+            .map_err(|_| "failed to parse gdbus idle time".to_string())?;
+        return Ok(ms / 1000);
+    }
+
+    Err("idle detection needs xprintidle (X11) or GNOME/Mutter (Wayland). Install: sudo apt install xprintidle".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn system_idle_seconds() -> Result<u64, String> {
     Err("system idle detection is not supported on this platform".to_string())
 }

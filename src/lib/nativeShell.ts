@@ -147,6 +147,21 @@ export async function updateTrayMenu(state: TrayMenuState) {
   await tray.setMenu(menu);
 }
 
+/** Opens the dev inspector window if hidden, hides it if visible.
+ * Only call this in dev builds — the window exists in all builds but there
+ * is no way to reach it in production without this shortcut. */
+export async function toggleDevWindow() {
+  if (!isTauri()) return;
+  const devWin = await WebviewWindow.getByLabel("dev");
+  if (!devWin) {
+    console.error("TrackDesk: dev window not found — check tauri.conf.json has label 'dev'");
+    return;
+  }
+  const visible = await devWin.isVisible();
+  if (visible) await devWin.hide();
+  else await devWin.show();
+}
+
 export async function broadcastWidgetAction(action: WidgetAction) {
   await emitWidgetAction(action);
 }

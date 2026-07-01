@@ -6,8 +6,8 @@ import { BlockedScreen } from "./screens/BlockedScreen";
 import { useTimer } from "./hooks/useTimer";
 import { useIdleDetector } from "./hooks/useIdleDetector";
 import { useActivityFeed } from "./hooks/useActivityFeed";
-import { broadcastTimerState, onWidgetAction } from "./lib/tauriBridge";
-import { focusMainWindow, hideFloatingWidget, quitApp, setupSystemTray, showFloatingWidget, updateTrayMenu } from "./lib/nativeShell";
+import { broadcastDevData, broadcastTimerState, onDevRequest, onWidgetAction } from "./lib/tauriBridge";
+import { focusMainWindow, hideFloatingWidget, quitApp, setupSystemTray, showFloatingWidget, toggleDevWindow, updateTrayMenu } from "./lib/nativeShell";
 import { isTauri } from "@tauri-apps/api/core";
 import type { AccountStatus, AuthUser, TimeStats } from "./types";
 import "./App.css";
@@ -36,7 +36,7 @@ export default function App() {
   const [accountStatus, setAccountStatus] = useState<AccountStatus>("active");
   const [blockedAt, setBlockedAt] = useState(new Date());
   const [idleSeconds, setIdleSeconds] = useState(0);
-  const [idleEvent, setIdleEvent] = useState<{ startedAt: Date; endedAt: Date; minutes: number } | null>(null);
+  const [idleEvent, setIdleEvent] = useState<{ startedAt: Date } | null>(null);
   const [widgetVisible, setWidgetVisible] = useState(false);
 
   const timer = useTimer();
@@ -47,10 +47,9 @@ export default function App() {
     active: isActive && timer.status === "running",
     thresholdSeconds: IDLE_THRESHOLD_SECONDS,
     onIdle: (seconds) => {
-      const endedAt = new Date();
-      const startedAt = new Date(endedAt.getTime() - seconds * 1000);
+      const startedAt = new Date(Date.now() - seconds * 1000);
       timer.pause();
-      setIdleEvent({ startedAt, endedAt, minutes: Math.max(1, Math.round(seconds / 60)) });
+      setIdleEvent({ startedAt });
     },
   });
 
@@ -117,6 +116,37 @@ export default function App() {
     }
   }, [isActive, timer.status]);
 
+  // Always-current snapshot of tracking data for the dev window. Using a ref
+  // means the request handler below never closes over stale state.
+  const devPayloadRef = useRef<Parameters<typeof broadcastDevData>[0] | null>(null);
+
+  // Rebuild the snapshot and push it to the dev window on every state change.
+  // Only runs in dev builds — zero production overhead.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !isTauri()) return;
+    const payload = {
+      timer: { status: timer.status, elapsedSeconds: timer.elapsedSeconds },
+      apps,
+      urls,
+      screenshots: screenshots.map((s) => ({ id: s.id, capturedAt: s.capturedAt.toISOString() })),
+    };
+    devPayloadRef.current = payload;
+    void broadcastDevData(payload);
+  }, [timer.status, timer.elapsedSeconds, apps, urls, screenshots]);
+
+  // When the dev window opens it emits td://dev-request once its listener is
+  // ready. Respond immediately with the latest snapshot so it doesn't have to
+  // wait for the next state change.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    onDevRequest(() => {
+      if (devPayloadRef.current) void broadcastDevData(devPayloadRef.current);
+    }).then((fn) => { unlisten = fn; });
+    return () => unlisten?.();
+  }, []);
+
+
   function handleLogin(email: string, status: AccountStatus) {
     const name = nameFromEmail(email) || "User";
     setUser({ name, email, initials: initialsFromName(name) });
@@ -140,12 +170,22 @@ export default function App() {
   }
 
   function handleKeepIdle() {
+    if (idleEvent) {
+      const elapsed = Math.round((Date.now() - idleEvent.startedAt.getTime()) / 1000);
+      setIdleSeconds((s) => s + elapsed);
+      // Timer is NOT adjusted — idle period counts as worked time.
+    }
     setIdleEvent(null);
     timer.resume();
   }
 
   function handleDiscardIdle() {
-    if (idleEvent) setIdleSeconds((s) => s + idleEvent.minutes * 60);
+    if (idleEvent) {
+      const elapsed = Math.round((Date.now() - idleEvent.startedAt.getTime()) / 1000);
+      setIdleSeconds((s) => s + elapsed);
+      // Subtract idle time from the work timer — user chose not to count it.
+      timer.setElapsedSeconds(Math.max(0, timer.elapsedSeconds - elapsed));
+    }
     setIdleEvent(null);
     timer.resume();
   }
@@ -184,6 +224,7 @@ export default function App() {
         onResume={timer.resume}
         onStop={timer.stop}
         onSignOut={handleSignOut}
+        onOpenDev={import.meta.env.DEV ? () => toggleDevWindow().catch(console.error) : undefined}
         widgetVisible={widgetVisible}
         onToggleWidget={handleToggleWidget}
         stats={stats}
@@ -195,9 +236,7 @@ export default function App() {
       {idleEvent && (
         <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/60 px-3 backdrop-blur-sm">
           <IdlePromptScreen
-            idleMinutes={idleEvent.minutes}
             idleStartedAt={idleEvent.startedAt}
-            idleEndedAt={idleEvent.endedAt}
             onKeep={handleKeepIdle}
             onDiscard={handleDiscardIdle}
           />
