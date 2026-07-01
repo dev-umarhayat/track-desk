@@ -111,6 +111,7 @@ if (-not $bar) {{exit 1}}
 $v = $bar.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
 $url = $v.Current.Value
 if ([string]::IsNullOrEmpty($url)) {{exit 1}}
+if (-not ($url.StartsWith("http://") -or $url.StartsWith("https://") -or $url.StartsWith("file://"))) {{exit 1}}
 Write-Output ($url + [char]0x1f + $root.Current.Name)"#,
         proc = process_name
     );
